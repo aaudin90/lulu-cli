@@ -6,17 +6,30 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
 
       - name: Build (release)
         run: swift build -c release
 
       - name: Build (debug)
         run: swift build
+
+      - name: Archive and CLI regression tests
+        run: python3 Tests/test_cli.py
+
+      - name: Unified log regression tests
+        run: |
+          swiftc Sources/LuLuCLI/Logs.swift Tests/LogsTests.swift -o "$RUNNER_TEMP/lulu-log-tests"
+          "$RUNNER_TEMP/lulu-log-tests"
 
       - name: Verify binary runs
         run: |
