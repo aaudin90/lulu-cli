@@ -13,6 +13,6 @@ Validate parameters before acting. `delete-match` requires a filter and `delete 
 
 Writes to user-owned `--file` archives require a caller-owned parent directory that is not writable by others. Each successful write creates a verified sibling backup and replaces the archive atomically under a per-file lock. Other programs may not honor that lock.
 
-System archives require root, global `--offline`, and a stopped LuLu application and system extension. Keep LuLu stopped until the write finishes, then start it normally. The process checks cannot prevent another program restarting LuLu concurrently. `reload` is unsupported and does not kill any process. Never stop LuLu or write system rules without the user's instruction.
+System archive writes require root. Live writes are allowed. After replacement, disk contents are checked at +0, +1, and +3 seconds. These checks do not prove LuLu loaded or applied the rules, and another writer can change the file later. If verification fails, the write already happened and the backup remains; inspect the file before any retry. `reload` is unsupported and does not kill any process. Write system rules only with the user's instruction.
 
 LuLu can group Developer ID executables by signing identifier and authority, so rules may apply to multiple paths sharing that identity. Inspect the actual identity and scope before writing.

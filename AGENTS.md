@@ -30,7 +30,7 @@ skills/lulu-cli/               # AI agent skill
 - Keep archive handling in main.swift and unified-log handling in Logs.swift.
 - CLI flags use `--kebab-case`.
 - Error output goes to stderr (`fputs(..., stderr)`), normal output to stdout (`print`).
-- System archive writes require root and `--offline`. User-owned offline archives and read operations do not require root.
+- System archive writes require root. User-owned archives and read operations do not require root.
 
 ## Testing
 
@@ -50,7 +50,7 @@ Use temporary archives with `--file` for mutation tests. Real system archives ar
 - The `Rule` class mirrors LuLu's Objective-C `Rule.m` with NSSecureCoding.
 - Rules are stored in an NSKeyedArchiver binary plist at `/Library/Objective-See/LuLu/rules.plist`.
 - `reload` is unsupported and never kills the system extension.
-- System archive writes require root, `--offline`, and a stopped LuLu application and extension. Keep LuLu stopped during the entire write, then start it normally.
+- Live system archive writes require root; no LuLu stop is required. Verify disk contents at +0, +1, and +3 seconds after replacement. These checks do not prove LuLu loaded the rules, and other writers can change the file later. A verification failure means the write already happened; inspect before retrying.
 - Writes use a per-file lock, verified sibling backup, and atomic replacement. Other programs may not honor the lock.
 - LuLu groups some signed binaries by signing identifier and authority; paths with the same identity may share rules.
 

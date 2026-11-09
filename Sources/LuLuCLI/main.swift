@@ -258,35 +258,8 @@ func isSystemRulesPath(_ path: String, root: String = "/Library/Objective-See/Lu
     return resolved == base || resolved.hasPrefix(base + "/")
 }
 
-func requireStoppedLuLu() throws {
-    let task = Process()
-    task.executableURL = URL(fileURLWithPath: "/bin/ps")
-    task.arguments = ["-axo", "pid=,comm="]
-    let data: Data
-    do { data = try captureLogProcess(task, timeout: 5, limit: 8 * 1024 * 1024) }
-    catch { throw MutationError.message("cannot inspect LuLu processes") }
-    guard let text = String(data: data, encoding: .utf8), !text.isEmpty else {
-        throw MutationError.message("cannot inspect LuLu processes")
-    }
-    for line in text.split(separator: "\n") {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard let split = trimmed.firstIndex(where: { $0.isWhitespace }),
-              Int(trimmed[..<split]) != nil else { throw MutationError.message("ambiguous process list") }
-        let path = trimmed[split...].trimmingCharacters(in: .whitespaces)
-        guard !path.isEmpty else { throw MutationError.message("ambiguous process list") }
-        let basename = (path as NSString).lastPathComponent
-        if basename == "LuLu" || basename == "com.objective-see.lulu.extension" {
-            throw MutationError.message("LuLu must be stopped before a system archive write")
-        }
-    }
-}
-
-func checkMutationPermission(system: Bool, offline: Bool, uid: uid_t, checkStopped: () throws -> Void) throws {
-    if system {
-        guard uid == 0 else { throw MutationError.message("system archive writes require root") }
-        guard offline else { throw MutationError.message("system archive writes require --offline") }
-        try checkStopped()
-    }
+func checkMutationPermission(system: Bool, uid: uid_t) throws {
+    if system && uid != 0 { throw MutationError.message("system archive writes require root") }
 }
 
 struct FileIdentity: Equatable {
@@ -390,9 +363,14 @@ func replaceContents(_ path: String, data: Data) throws {
     guard success else { throw MutationError.message("cannot write private output") }
 }
 
-func withMutation(path: String, offline: Bool, operation: (NSMutableDictionary) -> Bool) throws {
+struct CommittedMutation {
+    let data: Data
+    let backup: String
+}
+
+func commitMutation(path: String, operation: (NSMutableDictionary) -> Bool) throws -> CommittedMutation {
     let system = isSystemRulesPath(path)
-    try checkMutationPermission(system: system, offline: offline, uid: geteuid(), checkStopped: requireStoppedLuLu)
+    try checkMutationPermission(system: system, uid: geteuid())
     let directory = URL(fileURLWithPath: path).deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath().path
     var directoryInfo = stat()
     guard stat(directory, &directoryInfo) == 0, (directoryInfo.st_mode & S_IFMT) == S_IFDIR,
@@ -435,10 +413,36 @@ func withMutation(path: String, offline: Bool, operation: (NSMutableDictionary) 
         throw MutationError.message("archive ownership or mode changed")
     }
     try requireUnchanged(path, data: original, identity: FileIdentity(info))
-    try checkMutationPermission(system: system, offline: offline, uid: geteuid(), checkStopped: requireStoppedLuLu)
     guard rename(temp, path) == 0 else { throw MutationError.message("atomic replacement failed") }
     keepBackup = true
-    print("Saved. Backup: \(backup)")
+    return CommittedMutation(data: encoded, backup: backup)
+}
+
+func verifyMutation(path: String, committed: CommittedMutation,
+                    now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+                    wait: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+                    read: (String) throws -> Data = { try snapshot($0).0 }) throws {
+    let start = now()
+    for checkpoint in [0.0, 1.0, 3.0] {
+        let remaining = start + checkpoint - now()
+        if remaining > 0 { wait(remaining) }
+        let actual: Data
+        do { actual = try read(path) }
+        catch {
+            throw MutationError.message("WRITE ALREADY HAPPENED; verification failed at +\(Int(checkpoint))s; backup: \(committed.backup)")
+        }
+        guard actual == committed.data else {
+            throw MutationError.message("WRITE ALREADY HAPPENED; verification failed at +\(Int(checkpoint))s; backup: \(committed.backup)")
+        }
+        print("Verified +\(Int(checkpoint))s")
+    }
+}
+
+func withMutation(path: String, operation: (NSMutableDictionary) -> Bool) throws {
+    let committed = try commitMutation(path: path, operation: operation)
+    print("Write committed. Backup: \(committed.backup)")
+    try verifyMutation(path: path, committed: committed)
+    print("Saved and verified")
 }
 
 // MARK: - Commands
@@ -639,7 +643,7 @@ func toggleRule(_ rules: NSMutableDictionary, key: String, uuid: String, enable:
 
 func usage() {
     print("""
-    Usage: lulu-cli [--file PATH] [--offline] <command> [options]
+    Usage: lulu-cli [--file PATH] <command> [options]
       list [filter]                 List rules
       recent [N]                    List N most recent block rules
       logs [--last 5m] [--process PATH] [--limit N] [--json]
@@ -648,9 +652,9 @@ func usage() {
       delete-match --key KEY [--action allow|block] [--addr ADDR] [--port PORT]
       enable|disable --key KEY --uuid UUID
       reload                        Unsupported; restart LuLu using its app
-    --file selects an archive; --offline is required for system archive writes.
-    System writes also require root and LuLu to be stopped.
-    Each successful write creates a sibling backup. delete-match requires a filter.
+    --file selects an archive; system archive writes require root.
+    Writes create a sibling backup and verify disk at +0, +1, and +3 seconds.
+    delete-match requires a filter.
     """)
 }
 
@@ -717,20 +721,12 @@ func defaultRulesPath() -> String {
 
 var commandArguments = Array(CommandLine.arguments.dropFirst())
 var fileOverride: String?
-var offline = false
-while let first = commandArguments.first, first == "--file" || first == "--offline" {
-    if first == "--file" {
-        guard fileOverride == nil, commandArguments.count >= 2,
-              !commandArguments[1].hasPrefix("--"), !commandArguments[1].isEmpty else {
-            fail("--file requires one path")
-        }
-        fileOverride = commandArguments[1]
-        commandArguments.removeFirst(2)
-    } else {
-        guard !offline else { fail("duplicate --offline") }
-        offline = true
-        commandArguments.removeFirst()
+if commandArguments.first == "--file" {
+    guard commandArguments.count >= 2, !commandArguments[1].hasPrefix("--"), !commandArguments[1].isEmpty else {
+        fail("--file requires one path")
     }
+    fileOverride = commandArguments[1]
+    commandArguments.removeFirst(2)
 }
 guard let command = commandArguments.first else { usage(); exit(1) }
 let arguments = Array(commandArguments.dropFirst())
@@ -769,7 +765,7 @@ case "add":
     if options["--regex"] != nil && (try? NSRegularExpression(pattern: addr)) == nil { fail("invalid regex") }
     let path = fileOverride ?? defaultRulesPath()
     do {
-        try withMutation(path: path, offline: offline) { rules in
+        try withMutation(path: path) { rules in
             addRule(rules, key: key, path: app, action: action == "allow" ? RULE_STATE_ALLOW : RULE_STATE_BLOCK,
                     addr: addr, port: port, isRegex: options["--regex"] != nil)
             return true
@@ -790,7 +786,7 @@ case "delete", "delete-match", "enable", "disable":
     }
     let path = fileOverride ?? defaultRulesPath()
     do {
-        try withMutation(path: path, offline: offline) { rules in
+        try withMutation(path: path) { rules in
             if command == "delete" { return deleteRule(rules, key: key, uuid: options["--uuid"]) }
             if command == "delete-match" {
                 let action = options["--action"].map { $0 == "allow" ? 1 : 0 }
@@ -801,7 +797,7 @@ case "delete", "delete-match", "enable", "disable":
     } catch { fail("\(error)") }
 
 case "reload":
-    guard arguments.isEmpty, fileOverride == nil, !offline else { fail("invalid reload arguments") }
+    guard arguments.isEmpty, fileOverride == nil else { fail("invalid reload arguments") }
     fail("live reload is unsupported; restart LuLu using its app")
 
 default:

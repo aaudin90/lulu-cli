@@ -5,6 +5,7 @@ from pathlib import Path
 import plistlib
 import subprocess
 import stat
+import time
 import tempfile
 import unittest
 
@@ -222,13 +223,15 @@ class CLIRegression(unittest.TestCase):
         path = self.fixture("modern")
         args = [str(CLI), "--file", str(path), "add", "--key", "fixture", "--path", "/fixture/app", "--action", "allow"]
         processes = [subprocess.Popen(args + ["--addr", host], stdout=subprocess.PIPE, stderr=subprocess.PIPE) for host in ("one.example", "two.example")]
-        results = [p.communicate(timeout=20) or p.returncode for p in processes]
+        results = [p.communicate(timeout=20) for p in processes]
         self.assertTrue(all(p.returncode in (0, 1) for p in processes))
-        success = sum(p.returncode == 0 for p in processes)
-        self.assertGreaterEqual(success, 1)
+        backups = list(path.parent.glob("." + path.name + ".backup.*"))
+        self.assertGreaterEqual(len(backups), 1)
         actual = [v for k, v in rules(path).items() if not k.startswith("fixture-")]
-        self.assertEqual(len(actual), success)
-        self.assertEqual(len(list(path.parent.glob("." + path.name + ".backup.*"))), success)
+        self.assertEqual(len(actual), len(backups))
+        for proc, (_, stderr) in zip(processes, results):
+            if proc.returncode:
+                self.assertTrue(b"busy" in stderr or b"WRITE ALREADY HAPPENED" in stderr)
 
     def test_declined_mutations_create_no_backup(self):
         path = self.fixture("unknown")
@@ -265,11 +268,10 @@ class CLIRegression(unittest.TestCase):
         self.assertGreater(result.returncode, 0)
         self.assertIn("unsupported", result.stderr)
 
-    def test_global_flags_and_offline_guards(self):
+    def test_global_flags_and_system_guard(self):
         path = self.fixture("modern")
-        self.assertEqual(run("--offline", "--file", path, "list").returncode, 0)
-        self.assertEqual(run("--file", path, "--offline", "list").returncode, 0)
-        self.assertGreater(run("--offline", "--offline", "list").returncode, 0)
+        self.assertEqual(run("--file", path, "list").returncode, 0)
+        self.assertGreater(run("--offline", "--file", path, "list").returncode, 0)
         self.assertGreater(run("--file", path, "--file", path, "list").returncode, 0)
         self.assertGreater(run("add", "--key", "x", "--path", "/x", "--action", "allow").returncode, 0)
 
@@ -278,10 +280,9 @@ class CLIRegression(unittest.TestCase):
         path = self.fixture("modern")
         harness = source + "\nfunc captureLogProcess(_ process: Process, timeout: TimeInterval, limit: Int) throws -> Data { return Data() }\n" + r"""
         let path = CommandLine.arguments[1]
-        do { try checkMutationPermission(system: true, offline: false, uid: 0, checkStopped: {}); exit(3) } catch {}
-        do { try checkMutationPermission(system: true, offline: true, uid: 501, checkStopped: {}); exit(4) } catch {}
-        do { try checkMutationPermission(system: true, offline: true, uid: 0, checkStopped: { throw MutationError.message("active") }); exit(5) } catch {}
-        do { try checkMutationPermission(system: true, offline: true, uid: 0, checkStopped: {}) } catch { exit(6) }
+        do { try checkMutationPermission(system: true, uid: 501); exit(4) } catch {}
+        do { try checkMutationPermission(system: true, uid: 0) } catch { exit(6) }
+        do { try checkMutationPermission(system: false, uid: 501) } catch { exit(3) }
         let (before, info) = try snapshot(path)
         guard chmod(path, 0o640) == 0 else { exit(8) }
         do { try requireUnchanged(path, data: before, identity: FileIdentity(info)); exit(9) } catch {}
@@ -293,6 +294,82 @@ class CLIRegression(unittest.TestCase):
         result = subprocess.run(["swift", str(script), str(path)], capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(path.read_bytes(), b"changed")
+
+    def test_verification_schedule_and_read_failure(self):
+        source = (ROOT / "Sources/LuLuCLI/main.swift").read_text().split("var commandArguments =", 1)[0]
+        harness = source + r"""
+        var instant: TimeInterval = 40
+        var waits: [TimeInterval] = []
+        var observed: [TimeInterval] = []
+        let record = CommittedMutation(data: Data("expected".utf8), backup: "backup")
+        try verifyMutation(path: "unused", committed: record, now: { instant }, wait: { delay in waits.append(delay); instant += delay }, read: { _ in observed.append(instant - 40); return Data("expected".utf8) })
+        precondition(observed == [0, 1, 3] && waits == [1, 2])
+        do {
+            try verifyMutation(path: "unused", committed: record, now: { instant }, wait: { instant += $0 }, read: { _ in throw MutationError.message("read error") })
+            exit(3)
+        } catch {
+            precondition("\(error)".contains("WRITE ALREADY HAPPENED"))
+        }
+        """
+        script = self.tmp_path / "verification.swift"
+        script.write_text(harness)
+        result = subprocess.run(["swift", str(script)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_committed_write_checks_disk_for_three_seconds(self):
+        path = self.fixture("modern")
+        start = time.monotonic()
+        result = run("--file", path, "disable", "--key", "fixture", "--uuid", "fixture-0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertGreaterEqual(time.monotonic() - start, 3.0)
+        for checkpoint in ("Verified +0s", "Verified +1s", "Verified +3s"):
+            self.assertIn(checkpoint, result.stdout)
+
+    def test_changed_after_commit_is_reported_without_rollback(self):
+        path = self.fixture("modern")
+        original = path.read_bytes()
+        process = subprocess.Popen([str(CLI), "--file", str(path), "disable", "--key", "fixture", "--uuid", "fixture-0"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        deadline = time.monotonic() + 5
+        while path.read_bytes() == original and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertNotEqual(path.read_bytes(), original)
+        lock = os.open(str(path) + ".lulu-cli.lock", os.O_RDWR)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            path.write_bytes(b"changed by another writer")
+        finally:
+            os.close(lock)
+        stdout, stderr = process.communicate(timeout=5)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn(b"WRITE ALREADY HAPPENED", stderr)
+        self.assertEqual(path.read_bytes(), b"changed by another writer")
+        backups = list(path.parent.glob("." + path.name + ".backup.*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), original)
+
+    def test_missing_after_commit_reports_failed_verification(self):
+        path = self.fixture("modern")
+        original = path.read_bytes()
+        process = subprocess.Popen([str(CLI), "--file", str(path), "disable", "--key", "fixture", "--uuid", "fixture-0"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        deadline = time.monotonic() + 5
+        while path.read_bytes() == original and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertNotEqual(path.read_bytes(), original)
+        path.unlink()
+        stdout, stderr = process.communicate(timeout=5)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn(b"WRITE ALREADY HAPPENED", stderr)
+        self.assertFalse(path.exists())
+        backups = list(path.parent.glob("." + path.name + ".backup.*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), original)
+
+    def test_readonly_commands_have_no_delay(self):
+        path = self.fixture("modern")
+        for cmd in ("list", "recent"):
+            start = time.monotonic()
+            self.assertEqual(run("--file", path, cmd).returncode, 0)
+            self.assertLess(time.monotonic() - start, 2)
 
     def test_profile_path_validation(self):
         source = (ROOT / "Sources/LuLuCLI/main.swift").read_text().split("var commandArguments =", 1)[0]

@@ -11,6 +11,6 @@ See `lulu-cli --help` for current syntax. Put `--file PATH` before the command t
 - `enable` / `disable`: require `--key` and `--uuid`.
 - `reload`: unsupported; it does not stop the extension.
 
-Archive writes lock cooperating CLI writers and create verified sibling backups. Other programs may not honor the lock. System archive writes require root, `--offline`, and a stopped LuLu application and extension until the write finishes. Use an isolated, user-owned copy for testing. Unknown Rule fields prevent writing. `--addr` defaults to `*`; `--port` accepts `*` or 1–65535. Never infer coverage of live traffic from an archive edit or missing log events.
+Archive writes lock cooperating CLI writers and create verified sibling backups. Other programs may not honor the lock. System archive writes require root; LuLu can remain running. Disk is verified at +0, +1, and +3 seconds after replacement. A failed verification means the write already happened and the backup remains. This does not verify LuLu memory, rule effects, or later writes. Use an isolated, user-owned copy for testing. Unknown Rule fields prevent writing. `--addr` defaults to `*`; `--port` accepts `*` or 1–65535. Never infer coverage of live traffic from an archive edit or missing log events.
 
 LuLu may group Developer ID binaries by their signing identifier and authority, so multiple paths can share rules. `recent` describes rules; `logs` describes available events.

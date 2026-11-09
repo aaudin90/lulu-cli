@@ -5,9 +5,10 @@
 - Support LuLu 4.5.7 archive address-match types, legacy encodings, active profiles, and offline `--file` archives.
 - Reject unknown rule fields on writes and malformed CLI arguments before archive access.
 - Add `logs` for bounded LuLu unified-log inspection.
-- Require root, `--offline`, and a stopped LuLu application and extension for system archive writes.
+- Require root for system archive writes; LuLu can remain running.
 - Lock cooperating writers and create verified backups before atomic replacement.
-- Disable forced live `reload`; start LuLu normally after an offline change.
+- Verify written disk bytes at +0, +1, and +3 seconds; report failed checks as post-commit failures.
+- Disable forced live `reload`.
 
 
 ## 0.1.0
