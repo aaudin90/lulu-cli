@@ -17,7 +17,9 @@ make clean          # swift package clean
 ## Project Structure
 
 ```
-Sources/LuLuCLI/main.swift    # Everything lives here (single-file CLI)
+Sources/LuLuCLI/main.swift    # Archive handling and command dispatch
+Sources/LuLuCLI/Logs.swift    # Bounded unified-log queries and parsing
+Tests/                       # Synthetic archive and log regression tests
 Package.swift                  # SwiftPM manifest
 Makefile                       # Build/install interface
 skills/lulu-cli/               # AI agent skill
@@ -25,23 +27,32 @@ skills/lulu-cli/               # AI agent skill
 
 ## Code Style
 
-- Single-file CLI (main.swift). Keep it that way unless it grows significantly.
+- Keep archive handling in main.swift and unified-log handling in Logs.swift.
 - CLI flags use `--kebab-case`.
 - Error output goes to stderr (`fputs(..., stderr)`), normal output to stdout (`print`).
-- All write operations require root; read operations don't.
+- System archive writes require root and `--offline`. User-owned offline archives and read operations do not require root.
 
 ## Testing
 
-No automated tests currently. The CLI operates on a system plist owned by root, so testing requires either:
-- A mock plist file (pass custom path to `loadRules`/`saveRules`)
-- Running with sudo on a machine with LuLu installed
+Build first, then run the synthetic regression tests without sudo:
+
+```sh
+make build
+python3 Tests/test_cli.py
+swiftc Sources/LuLuCLI/Logs.swift Tests/LogsTests.swift -o /tmp/lulu-log-tests
+/tmp/lulu-log-tests
+```
+
+Use temporary archives with `--file` for mutation tests. Real system archives are suitable for read-only smoke tests. Verify actual filter decisions separately with the user's authorized network tests.
 
 ## Key Implementation Details
 
 - The `Rule` class mirrors LuLu's Objective-C `Rule.m` with NSSecureCoding.
 - Rules are stored in an NSKeyedArchiver binary plist at `/Library/Objective-See/LuLu/rules.plist`.
-- The LuLu system extension only reads rules at startup -- `reload` kills it so macOS auto-restarts it.
-- Always run `reload` after write operations.
+- `reload` is unsupported and never kills the system extension.
+- System archive writes require root, `--offline`, and a stopped LuLu application and extension. Keep LuLu stopped during the entire write, then start it normally.
+- Writes use a per-file lock, verified sibling backup, and atomic replacement. Other programs may not honor the lock.
+- LuLu groups some signed binaries by signing identifier and authority; paths with the same identity may share rules.
 
 ## PR Guidelines
 

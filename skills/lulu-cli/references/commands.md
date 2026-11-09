@@ -1,141 +1,16 @@
-# Command Reference
+# Commands
 
-## lulu-cli list [filter]
+See `lulu-cli --help` for current syntax. Put `--file PATH` before the command to select a separate archive. Without it the active profile is selected from LuLu preferences.
 
-List all firewall rules. Optionally filter by keyword (matches against key and binary path, case-insensitive).
+- `list [filter]`: inspect rule match types and endpoints.
+- `recent [N]`: inspect the most recent block rules; this is not an event log.
+- `logs [--last DURATION] [--process PATH] [--limit N] [--json]`: inspect LuLu unified-log events. Duration is up to seven days, limit is 1–10000, and process is an exact path. Records may omit application PID and transport.
+- `add --key KEY --path PATH --action allow|block [--addr ADDR] [--port PORT] [--regex]`.
+- `delete --key KEY [--uuid UUID]`: omitting UUID deletes all rules for KEY.
+- `delete-match --key KEY [--action allow|block] [--addr ADDR] [--port PORT]`: requires at least one explicit filter.
+- `enable` / `disable`: require `--key` and `--uuid`.
+- `reload`: unsupported; it does not stop the extension.
 
-- No sudo required
-- Output: `[key]` header, then one line per rule showing UUID, action, addr, port, type, and status
+Archive writes lock cooperating CLI writers and create verified sibling backups. Other programs may not honor the lock. System archive writes require root, `--offline`, and a stopped LuLu application and extension until the write finishes. Use an isolated, user-owned copy for testing. Unknown Rule fields prevent writing. `--addr` defaults to `*`; `--port` accepts `*` or 1–65535. Never infer coverage of live traffic from an archive edit or missing log events.
 
-**Examples:**
-```bash
-lulu-cli list              # all rules
-lulu-cli list curl         # rules where key or path contains "curl"
-lulu-cli list node         # rules for node
-lulu-cli list '*'          # global/wildcard rules only
-```
-
-## lulu-cli recent [N]
-
-Show the N most recent block rules, sorted by creation date (newest first). Default: 20.
-
-- No sudo required
-- Output: date, addr:port, type, key, UUID, and path (if different from key)
-- Only shows rules with action=block
-
-**Examples:**
-```bash
-lulu-cli recent            # last 20 blocks
-lulu-cli recent 5          # last 5 blocks
-```
-
-## lulu-cli add
-
-Add a new firewall rule.
-
-**Required flags:**
-- `--key KEY` - signing identity (e.g. `com.apple.curl`) or `*` for global
-- `--path PATH` - full binary path or `*` for global
-- `--action allow|block` - the rule action
-
-**Optional flags:**
-- `--addr ADDR` - domain, IP, or regex pattern. Default: `*` (any)
-- `--port PORT` - port number or `*` for any. Default: `*`
-- `--regex` - treat `--addr` value as a regular expression
-
-**Requires sudo.** Run `reload` after.
-
-**Examples:**
-```bash
-# Allow a domain for all apps
-sudo lulu-cli add --key '*' --path '*' --action allow --addr example.com --port 443
-
-# Allow domain + all subdomains via regex
-sudo lulu-cli add --key '*' --path '*' --action allow \
-  --addr '^(.+\.)?example\.com$' --port '*' --regex
-
-# Allow for a specific binary only
-sudo lulu-cli add --key "/usr/bin/curl" --path /usr/bin/curl \
-  --action allow --addr example.com --port 443
-
-# Block a domain
-sudo lulu-cli add --key '*' --path '*' --action block --addr malicious.com --port '*'
-```
-
-## lulu-cli delete
-
-Delete rule(s) by key.
-
-**Required flags:**
-- `--key KEY` - the rule key
-
-**Optional flags:**
-- `--uuid UUID` - delete only the rule with this UUID. If omitted, deletes ALL rules for the key.
-
-**Requires sudo.** Run `reload` after.
-
-**Examples:**
-```bash
-# Delete specific rule
-sudo lulu-cli delete --key "com.apple.curl" --uuid "A1B2C3D4-..."
-
-# Delete ALL rules for a key (careful!)
-sudo lulu-cli delete --key "com.apple.curl"
-```
-
-## lulu-cli delete-match
-
-Delete rules matching specific criteria within a key.
-
-**Required flags:**
-- `--key KEY` - the rule key
-
-**Optional flags (at least one recommended):**
-- `--action allow|block` - match by action
-- `--addr ADDR` - match by address (exact match)
-- `--port PORT` - match by port (exact match)
-
-All optional flags are ANDed together.
-
-**Requires sudo.** Run `reload` after.
-
-**Examples:**
-```bash
-# Delete all block rules on port 53 for curl
-sudo lulu-cli delete-match --key "com.apple.curl" --action block --port 53
-
-# Delete all allow rules for a specific domain
-sudo lulu-cli delete-match --key '*' --action allow --addr example.com
-```
-
-## lulu-cli enable
-
-Re-enable a previously disabled rule.
-
-**Required flags:**
-- `--key KEY` - the rule key
-- `--uuid UUID` - the rule UUID
-
-**Requires sudo.** Run `reload` after.
-
-## lulu-cli disable
-
-Disable a rule without deleting it.
-
-**Required flags:**
-- `--key KEY` - the rule key
-- `--uuid UUID` - the rule UUID
-
-**Requires sudo.** Run `reload` after.
-
-## lulu-cli reload
-
-Kill the LuLu system extension process. macOS auto-restarts registered system extensions, causing it to reload rules from disk.
-
-- ~8 second gap in filtering during restart
-- **Requires sudo**
-- Run after any add, delete, enable, or disable operation
-
-## lulu-cli help
-
-Display usage information and available commands.
+LuLu may group Developer ID binaries by their signing identifier and authority, so multiple paths can share rules. `recent` describes rules; `logs` describes available events.
